@@ -1119,16 +1119,22 @@ function createFirebaseAdapter(){
 const SB_VERSION = '2.45.4';
 async function ensureSupabaseSDK(){
   if (window.supabase && window.supabase.createClient) return;
+  // 顺序很关键：先同源 vendor 副本（github.io 已实测国内可达），再海外 CDN 兜底。
+  // 背景：有客户在移动 5G 下 jsdelivr 超时、unpkg 404（本机实测 unpkg 该路径已 404、
+  //   npmmirror 403），两个 CDN 全灭 → 页面能开但 SDK 拉不到，停在「未连接 + 脚本加载失败」。
+  //   自托管后不再依赖任何第三方 CDN；vendor 缺失时才退回 CDN。
   const urls = [
+    'vendor/supabase.min.js',
     'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@' + SB_VERSION + '/dist/umd/supabase.min.js',
-    'https://unpkg.com/@supabase/supabase-js@' + SB_VERSION + '/dist/umd/supabase.min.js'
+    'https://unpkg.com/@supabase/supabase-js@' + SB_VERSION + '/dist/umd/supabase.min.js',
+    'https://registry.npmmirror.com/@supabase/supabase-js/' + SB_VERSION + '/files/dist/umd/supabase.min.js'
   ];
   let last = null;
   for (const u of urls){
     try{ await loadScript(u); if (window.supabase && window.supabase.createClient) return; }
     catch(e){ last = e; }
   }
-  throw last || new Error('Supabase SDK 加载失败（网络无法访问 jsdelivr / unpkg）');
+  throw last || new Error('Supabase SDK 加载失败：同源 vendor 与 CDN 均不可达，请切换网络（Wi-Fi 或其他运营商）后重点「加入房间」');
 }
 function reasonText(r){
   return ({
