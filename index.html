@@ -580,12 +580,16 @@ function createLocalAdapter(){
     const R = (state && state.roles) || {};
     return !!pid && (pid === R.host || pid === R.admin);
   }
+  /* 房主转让：房主退出 → 管理员在场则给管理员；否则从在场成员中随机选一人 */
   function promoteAfterLeave(pid){
     const R = state.roles || (state.roles = { host:null, admin:null });
     if (R.admin === pid) R.admin = null;
     if (R.host === pid){
       if (R.admin && state.players.some(x => x.pid === R.admin)){ R.host = R.admin; R.admin = null; }
-      else R.host = state.players.length ? state.players[0].pid : null;
+      else {
+        const pool = state.players.map(x => x.pid);
+        R.host = pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+      }
     }
   }
 
@@ -976,22 +980,26 @@ function createFirebaseAdapter(){
        playersRef.on('value', s => {
          const v = s.val() || {};
          playersCache = Object.keys(v).map(id => ({ pid:id, name:(v[id] && v[id].name) || id }));
-         // 房主掉线递补：按加入序最早在册者用事务抢占（只有一人会提交成功）
-         const R = (stateCache && stateCache.roles) || {};
-         const departed = R.host;
-         if (departed && departed !== Session.pid &&
-             !playersCache.some(p => p.pid === departed) &&
-             playersCache[0] && playersCache[0].pid === Session.pid &&
-             lastPromote !== departed){
-           lastPromote = departed;
-           stateRef.transaction(cur => {
-             cur = cur || defaultState();
-             const RR = cur.roles || { host:null, admin:null };
-             if (RR.host !== departed) return;                 // 已被他人递补 → 放弃
-             RR.host = Session.pid; if (RR.admin === Session.pid) RR.admin = null;
-             cur.roles = RR; return cur;
-           });
-         }
+        // 房主退出/掉线转让：管理员在场 → 管理员；否则在场成员随机一人。
+        // 事务带「房主仍是 departed」守卫，并发下只有一笔转让生效。
+        const R = (stateCache && stateCache.roles) || {};
+        const departed = R.host;
+        if (departed && departed !== Session.pid &&
+            !playersCache.some(p => p.pid === departed) &&
+            playersCache.length && lastPromote !== departed){
+          lastPromote = departed;
+          const adminPresent = (R.admin && playersCache.some(p => p.pid === R.admin)) ? R.admin : null;
+          const pool = playersCache.map(p => p.pid);
+          const candidate = adminPresent || pool[Math.floor(Math.random() * pool.length)];
+          stateRef.transaction(cur => {
+            cur = cur || defaultState();
+            const RR = cur.roles || { host:null, admin:null };
+            if (RR.host !== departed) return;                 // 已被他人转让 → 放弃
+            RR.host = candidate;
+            if (RR.admin === candidate) RR.admin = null;
+            cur.roles = RR; return cur;
+          });
+        }
          push();
        });
        cbStatus('online');
@@ -1123,7 +1131,7 @@ function reasonText(r){
 
 function createSupabaseAdapter(){
   let sb = null, ch = null, offset = 0, players = {}, beatT = null, pollT = null;
-  let hostBeatT = null, hostAbsentSince = 0;
+  let hostBeatT = null;
   let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, stateCache = null, roomKey = 'default';
   let scope = 'quiz';
   const serverNow = () => Date.now() + offset;
@@ -1214,11 +1222,16 @@ function createSupabaseAdapter(){
       // 登记进房：服务端把首个「抢答身份」加入者记为房主；仅聊天不登记、不抢房主。
       // 若房间里的房主心跳已停超过 20 秒（上一场遗留 / 掉线空悬），服务端在此原子接管给我。
       if (scope === 'quiz') await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
-      // 房主心跳：每 5 秒续期 host_seen_at，证明「房主还在场」
+      // 在场心跳 + 房主转让检查，每 5 秒一次，全部由服务端原子裁决：
+      //   quiz_beat            → 登记「我在场」（仅抢答席位参与房主池）
+      //   quiz_transfer_if_stale → 房主空悬时按「管理员优先、否则随机在场成员」转让
       hostBeatT = setInterval(() => {
         if (document.hidden) return;
-        const rh = stateCache && stateCache.roles ? stateCache.roles.host : null;
-        if (rh === Session.pid) sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid });
+        if (scope === 'quiz')
+          sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid, p_name: Session.name });
+        sb.rpc('quiz_transfer_if_stale', { p_room: roomKey }).then(r => {
+          if (r && r.data && r.data.transferred) refresh();
+        });
       }, 5000);
       // 页面切后台时暂停心跳与轮询：移动浏览器会节流定时器，恢复瞬间的补跑会造成界面跳变
       beatT = setInterval(() => {
@@ -1228,16 +1241,6 @@ function createSupabaseAdapter(){
         let changed = false;
         for (const k in players){ if (players[k].hb < cut){ delete players[k]; changed = true; } }
         if (changed) push();
-        // 空悬房主回收：房主不在在线名单里持续 12 秒，且我是最早在册者 → 请求接管（服务端原子裁决）
-        const rh = stateCache && stateCache.roles ? stateCache.roles.host : null;
-        if (rh && rh !== Session.pid && !players[rh]){
-          if (!hostAbsentSince) hostAbsentSince = Date.now();
-          else if (Date.now() - hostAbsentSince > 12000 &&
-                   Object.keys(players)[0] === Session.pid && scope === 'quiz'){
-            hostAbsentSince = 0;
-            sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid }).then(refresh);
-          }
-        } else hostAbsentSince = 0;
       }, 1000);
       pollT = setInterval(() => { if (!document.hidden) refresh(); }, 2000);
       await send({ t:'join' });
@@ -1299,7 +1302,11 @@ function createSupabaseAdapter(){
       return (r.data || []).reverse().map(x => ({ pid:x.pid, name:x.name, text:x.text, ts:x.created_at }));
     },
 
-    leave(){ try{ send({ t:'leave' }); }catch(e){} },
+    leave(){
+      try{ send({ t:'leave' }); }catch(e){}
+      // 立即注销在场记录并把房主心跳置空 → 转让不必等 12 秒超时（弱网下更快收敛）
+      try{ sb && sb.rpc('quiz_leave', { p_room: roomKey, p_pid: Session.pid }); }catch(e){}
+    },
     close(){
       clearInterval(beatT); clearInterval(pollT); clearInterval(hostBeatT);
       try{ ch && sb && sb.removeChannel(ch); }catch(e){}
