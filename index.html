@@ -149,7 +149,8 @@ details.sum[open] summary::before{content:"▾ ";}
 /* ============ 进场弹窗 / Hub / 行程表 ============ */
 .ovl{position:fixed;inset:0;z-index:60;overflow-y:auto;-webkit-overflow-scrolling:touch;
   background:radial-gradient(1200px 700px at 50% -10%,#1b2b52 0%,var(--bg) 55%)}
-#splash{display:flex;align-items:flex-start;justify-content:center;padding:calc(14px + var(--safe-t)) 14px calc(20px + var(--safe-b))}
+/* 弹窗垂直水平居中；内容超高时仍可滚动 */
+#splash{display:flex;align-items:center;justify-content:center;padding:calc(14px + var(--safe-t)) 14px calc(20px + var(--safe-b))}
 .splashBox{width:min(430px,94vw);display:flex;flex-direction:column;align-items:center;gap:14px}
 .splashBox img{width:100%;border-radius:14px;border:1px solid var(--line);box-shadow:0 12px 40px rgba(0,0,0,.5);display:block}
 .splashX{width:46px;height:46px;border-radius:50%;border:1px solid var(--line);background:var(--panel);
@@ -187,6 +188,32 @@ details.sum[open] summary::before{content:"▾ ";}
 .modeBox.hidden{display:none}
 .advToggle{background:none;border:none;color:var(--dim);font-size:11.5px;text-decoration:underline;cursor:pointer;padding:2px 0;margin-top:2px}
 .backHub{background:none;border:none;color:var(--dim);font-size:11.5px;cursor:pointer;padding:2px 0}
+/* Hub 上的名字设置 */
+.hubName{width:min(430px,94vw);margin-bottom:18px}
+.hubName label{display:block;font-size:11.5px;color:var(--dim);margin-bottom:6px;letter-spacing:1px}
+.hubName input{width:100%;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  color:var(--txt);font-size:15px;font-weight:700;padding:12px 14px;text-align:center}
+.hubName input:focus{outline:none;border-color:var(--acc)}
+/* 聊天室 */
+.chatWrap{max-width:760px;margin:0 auto;height:100%;display:flex;flex-direction:column;
+  padding:calc(12px + var(--safe-t)) 12px calc(12px + var(--safe-b))}
+.chatHead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.chatHead input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  color:var(--txt);font-size:13px;padding:9px 12px;letter-spacing:1px}
+.chatList{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px}
+.chatMsg{font-size:13.5px;line-height:1.55;word-break:break-word}
+.chatMsg .cmH{display:block;font-size:11px;color:var(--dim);margin-bottom:2px}
+.chatMsg .cmH b{color:var(--acc);font-weight:700}
+.chatMsg.me .cmH b{color:var(--win)}
+.chatEmpty{color:var(--dim);font-size:12px;text-align:center;margin:auto}
+.chatBar{display:flex;gap:8px;margin-top:10px}
+.chatBar input{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  color:var(--txt);font-size:14px;padding:12px 14px}
+.chatBar input:focus{outline:none;border-color:var(--acc)}
+.chatBar button{border:none;border-radius:10px;background:var(--acc);color:#04121f;font-weight:700;
+  font-size:14px;padding:0 20px;cursor:pointer}
+.chatBar button:disabled{opacity:.4}
 </style>
 </head>
 <body>
@@ -204,6 +231,10 @@ details.sum[open] summary::before{content:"▾ ";}
   <div class="hubWrap">
     <div class="hubBrand">Only Treslam</div>
     <div class="hubSub">2026.11.02 — 11.04 · 千岛湖 · 赏秋</div>
+    <div class="hubName">
+      <label for="hubNameIn">我的名字（进抢答/聊天都用它，会自动记住）</label>
+      <input id="hubNameIn" maxlength="12" placeholder="填一个大家认得的名字" autocomplete="nickname">
+    </div>
     <div class="hubCards">
       <button class="hubCard" id="goQuiz">
         <span class="hcIco">⚡</span>
@@ -214,6 +245,11 @@ details.sum[open] summary::before{content:"▾ ";}
         <span class="hcIco">🍁</span>
         <span class="hcT">行程规划表</span>
         <span class="hcD">千岛湖赏秋 3 日团建 · 逐日时间轴</span>
+      </button>
+      <button class="hubCard" id="goChat">
+        <span class="hcIco">💬</span>
+        <span class="hcT">聊天室</span>
+        <span class="hcD">同房间实时群聊 · 历史消息自动加载</span>
       </button>
     </div>
     <div class="hubFoot">浙江霖园外 · 2026 秋季团建</div>
@@ -232,6 +268,22 @@ details.sum[open] summary::before{content:"▾ ";}
   </div>
 </main>
 
+<!-- 聊天室 -->
+<main id="chatScreen" class="ovl hidden">
+  <div class="chatWrap">
+    <div class="chatHead">
+      <button class="btn ghost" id="chatBack">← 返回</button>
+      <input id="chatRoom" maxlength="12" placeholder="房间号" autocomplete="off">
+      <span id="chatWho" style="color:var(--dim);font-size:11.5px;white-space:nowrap"></span>
+    </div>
+    <div class="chatList" id="chatList"><div class="chatEmpty">还没有消息，说点什么吧</div></div>
+    <form class="chatBar" id="chatForm">
+      <input id="chatText" maxlength="500" placeholder="输入消息…" autocomplete="off">
+      <button type="submit" id="chatSendBtn">发送</button>
+    </form>
+  </div>
+</main>
+
 <div id="app" class="hidden">
 
   <!-- ===== 顶部横幅：倒计时 / 抢答中 / 获胜者姓名 ===== -->
@@ -247,7 +299,7 @@ details.sum[open] summary::before{content:"▾ ";}
   <!-- ===== 加入界面 ===== -->
   <main id="joinScreen">
     <div class="card">
-      <h3>1. 你的昵称</h3>
+      <h3>1. 你的昵称（首页已设置并记住，此处可改）</h3>
       <input type="text" id="inName" maxlength="12" placeholder="例如：小明 / A队" autocomplete="off">
 
       <h3 style="margin-top:16px">2. 房间号</h3>
@@ -433,7 +485,7 @@ function derivePhase(s, now){
 }
 function defaultState(){
   return { roundNo:0, phase:'idle', endsAt:0, closedAt:0, winner:null, claims:[], players:[],
-           roles:{ host:null, admin:null } };
+           roles:{ host:null, admin:null }, chat:[] };
 }
 
 /* ------------------------- 声音 / 震动 / 常亮 ------------------------- */
@@ -493,7 +545,7 @@ function toast(msg, isErr){
 function createLocalAdapter(){
   const myId = Session.pid + '-' + rid();
   let room = '', ch = null, isLeader = false, state = null, players = {};
-  let cbSnap = () => {}, cbStatus = () => {}, beatT = null, leaseT = null, snapT = null, lastSnapAt = 0;
+  let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, beatT = null, leaseT = null, snapT = null, lastSnapAt = 0;
 
   const SK = () => 'qp_state_' + room;
   const LK = () => 'qp_lease_' + room;
@@ -542,7 +594,9 @@ function createLocalAdapter(){
         p.name = m.name; p.hb = t;
         if (!state.roles) state.roles = { host:null, admin:null };
         if (!state.roles.host) state.roles.host = m.pid;      // 房主 = 首个进房者
-        mutate(); return { t:'ok', to:m.from };
+        mutate();
+        post({ t:'chat_init', list: state.chat || [], to: m.from });   // 聊天历史随加入下发
+        return { t:'ok', to:m.from };
       }
       case 'leave':
         state.players = state.players.filter(x => x.pid !== m.pid);
@@ -556,6 +610,18 @@ function createLocalAdapter(){
           return { t:'error', to:m.from, msg:'目标玩家不在房间内' };
         R.admin = (tg && tg !== R.host) ? tg : null;
         mutate(); return { t:'ok', to:m.from };
+      }
+      case 'chat': {
+        const text = String(m.text || '').trim().slice(0, 500);
+        if (!text) return null;
+        const p = state.players.find(x => x.pid === m.pid);
+        const msg = { pid:m.pid, name:(p && p.name) || m.name || m.pid, text, ts:t };
+        state.chat = state.chat || [];
+        state.chat.push(msg);
+        if (state.chat.length > 100) state.chat.shift();
+        post({ t:'chat', msg });        // 其他标签页
+        chatCb(msg);                    // 本机回显
+        return null;
       }
       case 'start':
         if (!localPriv(m.pid)) return { t:'error', to:m.from, msg:'只有房主或管理员可以开始抢答' };
@@ -600,6 +666,8 @@ function createLocalAdapter(){
     if (!m) return;
     if (m.to && m.to !== myId) return;
     if (m.t === 'snapshot'){ lastSnapAt = now(); cbSnap(m.state); }
+    else if (m.t === 'chat') chatCb(m.msg);
+    else if (m.t === 'chat_init') (m.list || []).forEach(chatCb);
     else if (m.t === 'error'){ toast(m.msg, true); sfx.err(); }
   }
   function handle(m){
@@ -653,6 +721,9 @@ function createLocalAdapter(){
     claim(){ iClaimed = true; return send({ t:'claim' }); },
     resetRound(){ return send({ t:'reset' }); },
     setAdmin(target){ return send({ t:'set_admin', target: target || '' }); },
+    onChat(f){ chatCb = f; },
+    chatSend(text){ return send({ t:'chat', text: String(text).slice(0, 500) }); },
+    async chatHistory(){ return (isLeader && state && state.chat) ? state.chat.slice() : []; },
     leave(){ send({ t:'leave' }); },
     close(){
       clearInterval(beatT); clearInterval(leaseT); clearInterval(snapT);
@@ -679,7 +750,7 @@ function createLocalAdapter(){
    ===================================================================== */
 function createWSAdapter(){
   let ws = null, url = '', room = '', offset = 0, closedByMe = false;
-  let cbSnap = () => {}, cbStatus = () => {}, hb = null, retries = 0, pending = [];
+  let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, hb = null, retries = 0, pending = [];
 
   function send(o){
     const s = JSON.stringify(o);
@@ -728,6 +799,9 @@ function createWSAdapter(){
     async claim(){ iClaimed = true; send({ t:'claim' }); },
     async resetRound(){ send({ t:'reset' }); },
     async setAdmin(target){ send({ t:'set_admin', target: target || '' }); },
+    onChat(f){ chatCb = f; },
+    async chatSend(text){ send({ t:'chat', text: String(text).slice(0, 500) }); },
+    async chatHistory(){ return []; },     // 历史随 join 的 chat_init 下发，无需单独拉取
     leave(){ send({ t:'bye' }); },
     close(){ closedByMe = true; clearInterval(hb); try{ ws && ws.close(); }catch(e){} }
   };
@@ -758,6 +832,8 @@ function createWSAdapter(){
       sock.onmessage = e => {
         let m; try{ m = JSON.parse(e.data); }catch(_){ return; }
         if (m.t === 'snapshot') cbSnap(m.state);
+        else if (m.t === 'chat') chatCb(m.msg);
+        else if (m.t === 'chat_init') (m.list || []).forEach(chatCb);
         else if (m.t === 'error'){ toast(m.msg || '操作失败', true); sfx.err(); }
         else if (m.t === 'kicked'){ toast(m.msg || '已被移出房间', true); leaveRoom(); }
       };
@@ -955,17 +1031,25 @@ function createFirebaseAdapter(){
       });
     },
 
+    onChat(){},                                  // Firebase 模式不提供聊天室（该模式国内不可达，仅保留抢答）
+    async chatSend(){ toast('Firebase 模式不支持聊天室，请用默认链接进入', true); },
+    async chatHistory(){ return []; },
+
     leave(){ try{ meRef && meRef.remove(); }catch(e){} },
-    close(){ try{ meRef && meRef.remove(); }catch(e){} try{ root && root.off(); }catch(e){} }
+    close(){
+      clearInterval(beatT); clearInterval(pollT);
+    }
   };
 }
 
 /* =====================================================================
    适配器 4：Supabase（复用已有项目，零新增服务器）
    ---------------------------------------------------------------------
-   权威读写走 PostgREST RPC（quiz_start / quiz_claim / quiz_state / quiz_reset），
-   反应时间由 Postgres now() 在服务端打点；
-   即时推送与在线名单走 Realtime Broadcast 通道（无需建表订阅）。
+   权威读写：PostgREST RPC（quiz_room_join / quiz_start / quiz_claim /
+             quiz_state / quiz_reset / quiz_set_admin），反应时间由 Postgres
+             now() 在服务端打点；角色（房主/管理员）由 quiz_rooms 表持有。
+   即时推送：Realtime Broadcast 通道 + chat_msgs 表的 postgres_changes。
+   兜底：    每 1.2s 轮询 quiz_state。
    ===================================================================== */
 const SB_VERSION = '2.45.4';
 async function ensureSupabaseSDK(){
@@ -979,7 +1063,7 @@ async function ensureSupabaseSDK(){
     try{ await loadScript(u); if (window.supabase && window.supabase.createClient) return; }
     catch(e){ last = e; }
   }
-  throw last || new Error('Supabase SDK 加载失败（检查网络能否访问 jsdelivr/unpkg）');
+  throw last || new Error('Supabase SDK 加载失败（网络无法访问 jsdelivr / unpkg）');
 }
 function reasonText(r){
   return ({
@@ -995,7 +1079,7 @@ function reasonText(r){
 
 function createSupabaseAdapter(){
   let sb = null, ch = null, offset = 0, players = {}, beatT = null, pollT = null;
-  let cbSnap = () => {}, cbStatus = () => {}, stateCache = null, roomKey = 'default';
+  let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, stateCache = null, roomKey = 'default';
   const serverNow = () => Date.now() + offset;
 
   function toSnap(st){
@@ -1020,7 +1104,7 @@ function createSupabaseAdapter(){
       if (!r.error && r.data){ stateCache = r.data; push(); }
     }catch(e){}
   }
-  /* 时钟对齐：用 quiz_state 返回的 server_now，3 次取 RTT 最小的样本 */
+  /* 时钟对齐：quiz_state 返回服务端 now()，3 次采样取 RTT 最小者 */
   async function syncTime(){
     let best = null;
     for (let i = 0; i < 3; i++){
@@ -1060,33 +1144,35 @@ function createSupabaseAdapter(){
     async connect(o){
       cbStatus('connecting');
       await ensureSupabaseSDK();
+      roomKey = String(o.room || 'default');
       sb = supabase.createClient(o.url, o.anonKey, {
         realtime: { params: { eventsPerSecond: 20 } },
         auth: { persistSession: false }
       });
-      roomKey = String(o.room || 'default');
       ch = sb.channel('quiz-' + roomKey, { config:{ broadcast:{ self:true } } });
       ch.on('broadcast', { event:'*' }, msg => onMsg(msg.payload));
+      ch.on('postgres_changes',
+        { event:'INSERT', schema:'public', table:'chat_msgs', filter:'room=eq.' + roomKey },
+        pl => { const n = pl.new || {}; chatCb({ pid:n.pid, name:n.name, text:n.text, ts:n.created_at }); });
       await new Promise((res, rej) => {
+        const t = setTimeout(() => rej(new Error('Supabase Realtime 通道连接超时')), 10000);
         ch.subscribe(status => {
-          if (status === 'SUBSCRIBED') res();
-          else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT')
-            rej(new Error('Supabase Realtime 通道连接失败（' + status + '），请检查 anon key 与网络'));
+          if (status === 'SUBSCRIBED'){ clearTimeout(t); res(); }
+          else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
+            clearTimeout(t); rej(new Error('Supabase Realtime 通道失败：' + status));
+          }
         });
       });
       await syncTime();
-      // 登记进房：服务端把首个加入者记为房主（角色随 quiz_state 下发）
       await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
       beatT = setInterval(() => {
         send({ t:'beat' });
         const cut = Date.now() - 3500;
         let changed = false;
-        for (const id of Object.keys(players)){
-          if (players[id].hb < cut){ delete players[id]; changed = true; }
-        }
+        for (const k in players){ if (players[k].hb < cut){ delete players[k]; changed = true; } }
         if (changed) push();
       }, 1000);
-      pollT = setInterval(refresh, 1200);          // 广播丢失时的兜底轮询
+      pollT = setInterval(refresh, 1200);
       await send({ t:'join' });
       await refresh();
       cbStatus('online');
@@ -1123,6 +1209,20 @@ function createSupabaseAdapter(){
       if (r.data && r.data.ok === false){ toast(reasonText(r.data.reason), true); sfx.err(); return; }
       await send({ t:'state' });
       await refresh();
+    },
+
+    onChat(f){ chatCb = f; },
+    async chatSend(text){
+      const t = String(text || '').trim().slice(0, 500);
+      if (!t) return;
+      const r = await sb.from('chat_msgs').insert({ room:roomKey, pid:Session.pid, name:Session.name, text:t });
+      if (r.error) toast('发送失败：' + (r.error.message || r.error), true);
+    },
+    async chatHistory(){
+      const r = await sb.from('chat_msgs').select('pid,name,text,created_at')
+        .eq('room', roomKey).order('id', { ascending:false }).limit(100);
+      if (r.error) return [];
+      return (r.data || []).reverse().map(x => ({ pid:x.pid, name:x.name, text:x.text, ts:x.created_at }));
     },
 
     leave(){ try{ send({ t:'leave' }); }catch(e){} },
@@ -1269,10 +1369,16 @@ function loop(){ renderStage(); requestAnimationFrame(loop); }
 
 /* ---------- 加入 / 退出 ---------- */
 async function joinRoom(){
-  const name = $('#inName').value.trim().slice(0, 12);
+  // 名字在 Hub 已设置并持久化；这里只兜底同步，不再强制填写（只需房间号）
+  const name = ($('#inName').value.trim() || Session.name || ensureName()).slice(0, 12);
+  setName(name);
   const room = ($('#inRoom').value.trim() || 'default').toUpperCase().slice(0, 12);
   const mode = (document.querySelector('input[name=mode]:checked') || {}).value || 'local';
-  if (!name){ toast('请先输入昵称', true); $('#inName').focus(); return; }
+  // 换房间时先断开旧连接，避免适配器挂在旧房间上
+  if (ADAPTER && ADAPTER.room && ADAPTER.room !== room){
+    try{ ADAPTER.leave(); ADAPTER.close(); }catch(e){}
+    ADAPTER = null; SNAP = null; joined = false; setNet('offline');
+  }
 
   let opts = { room, name };
   if (mode === 'supabase'){
@@ -1317,6 +1423,7 @@ async function joinRoom(){
     joined = true; iClaimed = false; SNAP = null; phaseCache = PH.IDLE;
     $('#roomTag').textContent = '房间 ' + room;
     $('#joinScreen').classList.add('hidden');
+    ADAPTER.room = room;
     $('#gameScreen').classList.remove('hidden');
     keepAwake($('#optWake').checked);
     toast('已加入房间 ' + room);
@@ -1415,10 +1522,89 @@ function renderTrip(){
       '<span class="trWhere">' + esc(r[3]) + '</span></div>').join('') +
     '</section>').join('');
 }
+/* ---------- 聊天室 ---------- */
+let chatMsgs = [];
+function chatLine(m){
+  const d = m.ts ? new Date(m.ts) : new Date();
+  const hh = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  return '<div class="chatMsg' + (m.pid === Session.pid ? ' me' : '') + '"><span class="cmH"><b>' +
+         esc(m.name) + '</b> · ' + hh + '</span>' + esc(m.text) + '</div>';
+}
+function renderChatList(list){
+  chatMsgs = (list || []).slice(-100);
+  const box = $('#chatList');
+  box.innerHTML = chatMsgs.length ? chatMsgs.map(chatLine).join('')
+                                  : '<div class="chatEmpty">还没有消息，说点什么吧</div>';
+  box.scrollTop = box.scrollHeight;
+}
+function appendChat(m){
+  if (!m || !m.text) return;
+  if (chatMsgs.some(x => x.pid === m.pid && x.ts === m.ts && x.text === m.text)) return;   // 去重
+  chatMsgs.push(m); if (chatMsgs.length > 100) chatMsgs.shift();
+  const box = $('#chatList');
+  const empty = box.querySelector('.chatEmpty'); if (empty) empty.remove();
+  box.insertAdjacentHTML('beforeend', chatLine(m));
+  box.scrollTop = box.scrollHeight;
+}
+/* 仅建立连接（聊天室用），不进入抢答界面 */
+async function connectFor(room){
+  const mode = (document.querySelector('input[name=mode]:checked') || {}).value || 'local';
+  ensureName();
+  const opts = { room, name: Session.name };
+  if (mode === 'supabase'){
+    opts.url = store.get('sb_url', location.host.endsWith('.supabase.co') ? location.origin : '');
+    opts.anonKey = store.get('sb_key', '');
+    if (!opts.url || !opts.anonKey) throw new Error('缺少 Supabase 配置，请用带参数的进入链接打开');
+  }
+  if (mode === 'ws'){
+    opts.url = store.get('ws', defaultWsUrl());
+    if (!opts.url) throw new Error('缺少 WebSocket 地址');
+  }
+  ADAPTER = mode === 'ws' ? createWSAdapter()
+          : mode === 'firebase' ? createFirebaseAdapter()
+          : mode === 'supabase' ? createSupabaseAdapter()
+          : createLocalAdapter();
+  ADAPTER.onSnapshot(onSnapshot);
+  ADAPTER.onStatus(setNet);
+  ADAPTER.onChat(appendChat);
+  await ADAPTER.connect(opts);
+  ADAPTER.room = room;
+}
+async function openChat(){
+  const room = ($('#chatRoom').value.trim() || store.get('room', '') || '8888').toUpperCase().slice(0, 12);
+  $('#chatRoom').value = room;
+  $('#chatWho').textContent = ensureName();
+  showOnly(['chatScreen']);
+  try{
+    if (!ADAPTER || ADAPTER.room !== room){
+      if (ADAPTER){ try{ ADAPTER.leave(); ADAPTER.close(); }catch(e){} ADAPTER = null; SNAP = null; joined = false; }
+      renderChatList([]);
+      await connectFor(room);
+      const hist = await ADAPTER.chatHistory();      // supabase 拉历史；ws/local 已由 chat_init 增量填入
+      if (hist && hist.length) renderChatList(hist);
+    }
+  }catch(e){ toast('聊天室连接失败：' + (e && e.message || e), true); }
+}
+
 /* 三个主视图互斥显示；splash 独立盖在最上层 */
 function showOnly(ids){
-  ['hubScreen', 'tripScreen', 'app'].forEach(id =>
+  ['hubScreen', 'tripScreen', 'chatScreen', 'app'].forEach(id =>
     document.getElementById(id).classList.toggle('hidden', ids.indexOf(id) === -1));
+}
+/* 名字：Hub 上设置、localStorage 持久化；从未设置时给一个可改的默认名 */
+function ensureName(){
+  if (!Session.name){
+    Session.name = '玩家' + String(Math.floor(1000 + Math.random() * 9000));
+    store.set('name', Session.name);
+  }
+  return Session.name;
+}
+function setName(v){
+  Session.name = String(v || '').trim().slice(0, 12);
+  store.set('name', Session.name);
+  $('#hubNameIn').value = Session.name;
+  $('#inName').value = Session.name;
+  $('#chatWho').textContent = Session.name;
 }
 
 function init(){
@@ -1520,6 +1706,20 @@ function init(){
   });
   $('#goTrip').addEventListener('click', () => { renderTrip(); showOnly(['tripScreen']); });
   $('#tripBack').addEventListener('click', () => showOnly(['hubScreen']));
+  $('#hubNameIn').value = ensureName();
+  $('#hubNameIn').addEventListener('input', e => setName(e.target.value));
+  $('#chatRoom').value = (store.get('room', '') || '8888');
+  $('#chatWho').textContent = Session.name;
+  $('#goChat').addEventListener('click', openChat);
+  $('#chatBack').addEventListener('click', () => showOnly(['hubScreen']));
+  $('#chatRoom').addEventListener('change', openChat);
+  $('#chatForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const v = $('#chatText').value.trim();
+    if (!v || !ADAPTER) return;
+    $('#chatText').value = '';
+    Promise.resolve(ADAPTER.chatSend(v)).catch(err => toast('发送失败：' + (err && err.message || err), true));
+  });
   $('#backHub').addEventListener('click', () => showOnly(['hubScreen']));
   $('#advToggle').addEventListener('click', () => $('#modeBox').classList.toggle('hidden'));
 
