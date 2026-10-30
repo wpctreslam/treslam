@@ -24,7 +24,12 @@ body{
   -webkit-user-select:none;user-select:none;
 }
 input,textarea{-webkit-user-select:text;user-select:text}
-#app{max-width:520px;margin:0 auto;padding:0 14px calc(20px + var(--sb));min-height:100vh;display:flex;flex-direction:column}
+/* min-height 同时给 vh 与 dvh：手机地址栏收放时 dvh 生效，避免整页高度跳变 */
+#app{max-width:520px;margin:0 auto;padding:0 14px calc(20px + var(--sb));min-height:100vh;min-height:100dvh;display:flex;flex-direction:column}
+/* 移动端输入框 ≥16px：防止 iOS 聚焦时自动放大页面造成跳动 */
+@media (max-width:640px){
+  #inName,#inRoom,#chatText,#hubNameIn,#inWs,#inSbUrl,#inSbKey,#chatRoom{font-size:16px}
+}
 
 /* ---------- 顶部横幅：获胜者显示区（需求要求固定在页面顶部） ---------- */
 #topbar{
@@ -529,8 +534,12 @@ async function keepAwake(on){
 document.addEventListener('visibilitychange', () => { if (!document.hidden && joined) keepAwake($('#optWake').checked); });
 
 /* ------------------------- Toast ------------------------- */
-let toastT = null;
+let toastT = null, lastToastMsg = '', lastToastAt = 0;
 function toast(msg, isErr){
+  // 弱网下同类提示可能连发；1.5 秒内同文案去重，避免提示条反复弹出造成画面跳动
+  const nowTs = Date.now();
+  if (msg === lastToastMsg && nowTs - lastToastAt < 1500) return;
+  lastToastMsg = msg; lastToastAt = nowTs;
   const el = $('#toast');
   el.textContent = msg;
   el.className = 'show' + (isErr ? ' err' : '');
@@ -1203,14 +1212,16 @@ function createSupabaseAdapter(){
       scope = o.scope === 'chat' ? 'chat' : 'quiz';
       // 登记进房：服务端把首个「抢答身份」加入者记为房主；仅聊天不登记、不抢房主
       if (scope === 'quiz') await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
+      // 页面切后台时暂停心跳与轮询：移动浏览器会节流定时器，恢复瞬间的补跑会造成界面跳变
       beatT = setInterval(() => {
+        if (document.hidden) return;
         send({ t:'beat' });
         const cut = Date.now() - 3500;
         let changed = false;
         for (const k in players){ if (players[k].hb < cut){ delete players[k]; changed = true; } }
         if (changed) push();
       }, 1000);
-      pollT = setInterval(refresh, 1200);
+      pollT = setInterval(() => { if (!document.hidden) refresh(); }, 2000);
       await send({ t:'join' });
       await refresh();
       cbStatus('online');
@@ -1293,34 +1304,44 @@ function setNet(status){
 function isHost(){ const r = SNAP && SNAP.roles; return !!r && r.host === Session.pid; }
 function isPriv(){ const r = SNAP && SNAP.roles; return !!r && (r.host === Session.pid || r.admin === Session.pid); }
 
+let lastPlayersHTML = null, lastRankHTML = null;
 function renderPlayers(){
   const box = $('#players');
   const list = (SNAP && SNAP.players) || [];
   const winPid = SNAP && SNAP.winner ? SNAP.winner.pid : null;
   const roles = (SNAP && SNAP.roles) || {};
-  $('#pCount').textContent = list.length;
-  if (!list.length){ box.innerHTML = '<span class="empty">等待玩家加入…</span>'; return; }
-  box.innerHTML = list.map(p => {
-    const badge = p.pid === roles.host ? '<i class="role h">房主</i>'
-                : p.pid === roles.admin ? '<i class="role a">管理</i>' : '';
-    // 仅房主看到「设/撤管理员」小开关；界面其余部分不变
-    const adm = (isHost() && p.pid !== Session.pid)
-      ? '<button class="setadm" data-pid="' + esc(p.pid) + '">' + (p.pid === roles.admin ? '撤' : '设') + '</button>'
-      : '';
-    return '<span class="p' + (p.pid === Session.pid ? ' me' : '') + (p.pid === winPid ? ' win' : '') + '">' +
-      (p.pid === Session.pid ? '★ ' : '') + esc(p.name) + badge + adm + '</span>';
-  }).join('');
+  sTxt('pCount', String(list.length));
+  const html = !list.length
+    ? '<span class="empty">等待玩家加入…</span>'
+    : list.map(p => {
+        const badge = p.pid === roles.host ? '<i class="role h">房主</i>'
+                    : p.pid === roles.admin ? '<i class="role a">管理</i>' : '';
+        // 仅房主看到「设/撤管理员」小开关；界面其余部分不变
+        const adm = (isHost() && p.pid !== Session.pid)
+          ? '<button class="setadm" data-pid="' + esc(p.pid) + '">' + (p.pid === roles.admin ? '撤' : '设') + '</button>'
+          : '';
+        return '<span class="p' + (p.pid === Session.pid ? ' me' : '') + (p.pid === winPid ? ' win' : '') + '">' +
+          (p.pid === Session.pid ? '★ ' : '') + esc(p.name) + badge + adm + '</span>';
+      }).join('');
+  // 内容未变化时不触碰 DOM：避免每秒多次 innerHTML 重建造成的移动端闪烁/跳动
+  if (html === lastPlayersHTML) return;
+  lastPlayersHTML = html;
+  box.innerHTML = html;
 }
 
 function renderRank(){
   const ol = $('#rank'), claims = (SNAP && SNAP.claims) || [];
-  $('#roundTag').textContent = SNAP && SNAP.roundNo ? '· 第 ' + SNAP.roundNo + ' 轮' : '';
-  $('#rankNone').classList.toggle('hidden', claims.length > 0);
-  ol.innerHTML = claims.slice(0, 20).map((c, i) =>
+  sTxt('roundTag', SNAP && SNAP.roundNo ? '· 第 ' + SNAP.roundNo + ' 轮' : '');
+  const rnEl = el('rankNone'), wantHide = claims.length > 0;
+  if (rnEl.classList.contains('hidden') !== wantHide) rnEl.classList.toggle('hidden', wantHide);
+  const html = claims.slice(0, 20).map((c, i) =>
     '<li class="' + (i === 0 ? 'top' : '') + '"><span class="nm">' +
     (c.pid === Session.pid ? '★ ' : '') + esc(c.name) +
     '</span><span class="ms">' + c.ms + ' ms</span></li>'
   ).join('');
+  if (html === lastRankHTML) return;      // 无变化不重建，防移动端抖动
+  lastRankHTML = html;
+  ol.innerHTML = html;
 }
 
 /* --- DOM 写入缓存：值未变化时不触碰 DOM（60fps 循环下省电、不卡顿） --- */
@@ -1397,8 +1418,19 @@ function renderStage(){
   sTxt('startBtn', SNAP && SNAP.roundNo ? '下一轮抢答' : '开始抢答');
 }
 
+/* ---- 渲染合并：同一帧内多次快照只渲染一次，避免移动端列表反复重建导致抖动 ---- */
+const raf = typeof requestAnimationFrame === 'function'
+  ? requestAnimationFrame.bind(window) : f => setTimeout(() => f(), 16);
+let renderQueued = false, renderCount = 0;
+const DEBUG = /[?&]debug=1/.test(location.search);
+function queueRender(){
+  if (renderQueued) return;
+  renderQueued = true;
+  raf(() => { renderQueued = false; renderAll(); });
+}
 function renderAll(){
   if (!joined) return;
+  renderCount++;
   renderPlayers(); renderRank(); renderStage();
 }
 function onSnapshot(s){
@@ -1408,9 +1440,17 @@ function onSnapshot(s){
   if (w && w.pid !== prevWinner){
     if (w.pid === Session.pid) sfx.win(); else sfx.lose();
   }
-  renderAll();
+  queueRender();
 }
-function loop(){ renderStage(); requestAnimationFrame(loop); }
+/* 倒计时帧循环：仅在游戏页可见时写 DOM；?debug=1 时每 5 秒打印渲染次数便于排查抖动 */
+function loop(){
+  if (joined && !document.getElementById('gameScreen').classList.contains('hidden')) renderStage();
+  requestAnimationFrame(loop);
+}
+setInterval(() => {
+  if (DEBUG) console.info('[render] 5s 内 renderAll 次数 =', renderCount);
+  renderCount = 0;
+}, 5000);
 
 /* ---------- 加入 / 退出 ---------- */
 async function joinRoom(){
