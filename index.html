@@ -44,7 +44,7 @@ input,textarea{-webkit-user-select:text;user-select:text}
 .dot.on{background:var(--go);box-shadow:0 0 8px var(--go)}
 .dot.off{background:var(--bad)}
 /* 状态文字定宽：弱网下「已连接 / 连接中… / 未连接」来回切换时，居中的顶栏不会左右晃动 */
-#netTxt{display:inline-block;min-width:46px;text-align:left}
+#netTxt{display:inline-block;min-width:52px;text-align:left}
 /* 预留 64px 倒计时数字的高度：点「开始抢答」瞬间标题从 30px 文字切成 64px 数字，
    不预留高度整页会往下弹一次 —— 这就是「一点开始画面就跳」的直接原因 */
 #topTitle{font-size:30px;font-weight:800;line-height:1.15;margin-top:6px;letter-spacing:1px;word-break:break-all;
@@ -1197,11 +1197,14 @@ function createSupabaseAdapter(){
   }
   const push = () => cbSnap(toSnap(stateCache));
 
+  // restOk：最近一次 REST 轮询是否成功。Realtime 降级模式下，它是「我还连着服务器」的唯一判据。
+  let restOk = false, restOkAt = 0;
   async function refresh(){
     try{
       const r = await sb.rpc('quiz_state', { p_room: roomKey });
-      if (!r.error && r.data){ stateCache = r.data; push(); }
-    }catch(e){}
+      if (!r.error && r.data){ stateCache = r.data; restOk = true; restOkAt = Date.now(); push(); }
+      else restOk = false;
+    }catch(e){ restOk = false; }
   }
   /* 时钟对齐：quiz_state 返回服务端 now()，3 次采样取 RTT 最小者 */
   async function syncTime(){
@@ -1232,9 +1235,52 @@ function createSupabaseAdapter(){
     if (p.t === 'leave'){ delete players[p.pid]; push(); refresh(); return; }
     if (p.t === 'round' || p.t === 'state'){ refresh(); return; }
   }
+  // 通道未订阅/已死时广播必然失败：吞掉即可。开局/抢答/重置/心跳全走 REST，广播只是加速。
   function send(base){
     const m = Object.assign({}, base, { pid:Session.pid, name:Session.name });
-    return ch.send({ type:'broadcast', event:'quiz', payload:m });
+    try{ return Promise.resolve(ch && ch.send({ type:'broadcast', event:'quiz', payload:m })); }
+    catch(e){ return Promise.resolve(); }
+  }
+
+  /* ---------- Realtime 通道：可降级、可自愈 ----------
+     部分移动 5G / 微信内核对 wss 长连接做干扰（握手成功但数据帧被掐，或升级被 DPI 拦），
+     而同域 REST 完全正常。旧实现把「订阅成功」当加入前置条件 → 这类网络永远进不去。
+     现在：订阅失败/超时不抛错、不阻断加入（REST 轮询模式先行），后台每 15 秒重试，
+     连上即切回实时模式（广播恢复、状态变「已连接」）。 */
+  let subbing = false, subRetryT = null;
+  const chLiveNow = () => !!ch && (ch.state === 'joined' || ch.state === 'SUBSCRIBED');
+  function subscribeLive(){
+    if (subbing || chLiveNow() || !ch) return;
+    subbing = true;
+    try{
+      ch.subscribe(status => {
+        if (status === 'SUBSCRIBED'){ subbing = false; deadTicks = 0; setStatus('online'); }
+        else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') subbing = false;
+      });
+    }catch(e){ subbing = false; }
+    setTimeout(() => { subbing = false; }, 10000);        // 本轮订阅 10 秒无果即放弃，等重试
+    if (!subRetryT)
+      subRetryT = setInterval(() => { if (!document.hidden && !chLiveNow()) subscribeLive(); }, 15000);
+  }
+  /* 聊天降级：通道死时按 3 秒 REST 轮询补收 chat_msgs（与 chatHistory 同一查询形状）。
+     用「created_at|pid|text」做幂等键，通道恢复后与 postgres_changes 双路不重放。 */
+  const chatSeen = {};
+  function deliverChat(n){
+    if (!n) return;
+    const k = (n.created_at || '') + '|' + (n.pid || '') + '|' + (n.text || '');
+    if (chatSeen[k]) return;
+    chatSeen[k] = true;
+    chatCb({ pid:n.pid, name:n.name, text:n.text, ts:n.created_at });
+  }
+  let chatPollT = null;
+  function startChatPoll(){
+    if (chatPollT) return;
+    chatPollT = setInterval(() => {
+      if (document.hidden || chLiveNow()) return;
+      sb.from('chat_msgs').select('pid,name,text,created_at')
+        .eq('room', roomKey).order('id', { ascending:false }).limit(60)
+        .then(r => { if (r.error || !r.data) return; r.data.slice().reverse().forEach(deliverChat); }, () => {});
+    }, 3000);
   }
 
   return {
@@ -1256,16 +1302,9 @@ function createSupabaseAdapter(){
       ch.on('broadcast', { event:'*' }, msg => onMsg(msg.payload));
       ch.on('postgres_changes',
         { event:'INSERT', schema:'public', table:'chat_msgs', filter:'room=eq.' + roomKey },
-        pl => { const n = pl.new || {}; chatCb({ pid:n.pid, name:n.name, text:n.text, ts:n.created_at }); });
-      await new Promise((res, rej) => {
-        const t = setTimeout(() => rej(new Error('Supabase Realtime 通道连接超时')), 10000);
-        ch.subscribe(status => {
-          if (status === 'SUBSCRIBED'){ clearTimeout(t); res(); }
-          else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT'){
-            clearTimeout(t); rej(new Error('Supabase Realtime 通道失败：' + status));
-          }
-        });
-      });
+        pl => deliverChat(pl.new));
+      // 订阅非阻塞：失败/超时不抛错、不阻断加入；REST 轮询模式先行，通道后台自愈。
+      subscribeLive();
       await syncTime();
       scope = o.scope === 'chat' ? 'chat' : 'quiz';
       // 登记进房：服务端把首个「抢答身份」加入者记为房主；仅聊天不登记、不抢房主。
@@ -1274,18 +1313,21 @@ function createSupabaseAdapter(){
       // 在场心跳 + 房主转让检查，每 5 秒一次，全部由服务端原子裁决：
       //   quiz_beat            → 登记「我在场」（仅抢答席位参与房主池）
       //   quiz_transfer_if_stale → 房主空悬时按「管理员优先、否则随机在场成员」转让
-      // 关键：心跳必须绑定 Realtime 通道存活。弱网下会出现「通道已死但 REST 还通」的
-      // 半死标签页——它不在任何人的玩家名单里，却靠 REST 心跳霸占房主席位，造成
-      // 「唯一可见玩家不是房主、按钮全灰」的界面错乱。通道不在线就停止续期，12 秒内让位。
+      // 心跳判据 = 「任一路径可达」（通道活 或 最近 10 秒 REST 成功过）。
+      // 为什么不再要求通道活：名单现在来自服务端 presence（quiz_state.members），
+      // 能 beat 的标签页一定在所有人名单里可见，不会再出现「隐形霸房主」；
+      // 而只认通道活，会把「通道被运营商掐掉但 REST 正常」的手机整体踢出局（本次故障）。
+      // 真正全断（REST 也失败）才停止续期，12 秒内让位。
       hostBeatT = setInterval(() => {
         if (document.hidden) return;
-        const chLive = !!ch && (ch.state === 'joined' || ch.state === 'SUBSCRIBED');
-        // 状态如实反映通道存活（半死页不再谎报「已连接」），但带迟滞：
-        // 连续 2 次（≈10 秒）不在线才判「未连接」，恢复即刻判「已连接」。
+        const live = chLiveNow();
+        const restFresh = restOk && (Date.now() - restOkAt) < 10000;
+        // 状态三态：已连接（通道活）/ 轮询模式（通道死但 REST 通）/ 未连接（REST 也断，迟滞 2 次）。
         // 文字定宽 + 回调去抖，状态切换不会造成任何布局位移。
-        deadTicks = chLive ? 0 : deadTicks + 1;
-        setStatus(deadTicks >= 2 ? 'offline' : 'online');
-        if (!chLive) return;
+        if (live){ deadTicks = 0; setStatus('online'); }
+        else if (restFresh){ deadTicks = 0; setStatus('polling'); }
+        else { deadTicks++; if (deadTicks >= 2) setStatus('offline'); }
+        if (!restFresh) return;
         // ⚠ supabase-js 的 builder 是「惰性」的：不 await、不挂 .then 就永远不会发出请求，
         //   而且不会报错。这里曾是裸调用 → 线上实测 quiz_beat 请求数恒为 0
         //   （quiz_state×45 / quiz_transfer_if_stale×16 / 控制台 0 error），
@@ -1320,9 +1362,10 @@ function createSupabaseAdapter(){
       };
       if (typeof document !== 'undefined' && document.addEventListener)
         document.addEventListener('visibilitychange', visH);
-      await send({ t:'join' });
+      try{ await send({ t:'join' }); }catch(e){}
       await refresh();
-      deadTicks = 0; setStatus('online');
+      if (scope === 'chat') startChatPoll();
+      deadTicks = 0; setStatus(chLiveNow() ? 'online' : (restOk ? 'polling' : 'connecting'));
     },
 
     async startRound(){
@@ -1396,6 +1439,7 @@ function createSupabaseAdapter(){
     },
     close(){
       clearInterval(beatT); clearInterval(pollT); clearInterval(hostBeatT);
+      clearInterval(subRetryT); clearInterval(chatPollT); subRetryT = null; chatPollT = null;
       if (typeof document !== 'undefined' && document.removeEventListener && visH)
         document.removeEventListener('visibilitychange', visH);
       visH = null;
@@ -1411,8 +1455,9 @@ function createSupabaseAdapter(){
 /* ---------- 渲染 ---------- */
 function setNet(status){
   const dot = $('#netDot'), txt = $('#netTxt');
-  dot.className = 'dot' + (status === 'online' ? ' on' : status === 'connecting' ? '' : ' off');
-  txt.textContent = status === 'online' ? '已连接' : status === 'connecting' ? '连接中…' : '未连接';
+  // 轮询模式 = Realtime 通道不可达但 REST 正常：功能完整，只是推送延迟 ≤2 秒。
+  dot.className = 'dot' + (status === 'online' || status === 'polling' ? ' on' : status === 'connecting' ? '' : ' off');
+  txt.textContent = status === 'online' ? '已连接' : status === 'polling' ? '轮询模式' : status === 'connecting' ? '连接中…' : '未连接';
 }
 
 /* 权限：房主 = 首个进房者；管理员由房主指定。仅这两者可 开始/下一轮/重置 */
