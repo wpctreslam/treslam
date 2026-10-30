@@ -244,7 +244,7 @@ details.sum[open] summary::before{content:"▾ ";}
       <button class="hubCard" id="goQuiz">
         <span class="hcIco">⚡</span>
         <span class="hcT">多人抢答器</span>
-        <span class="hcD">实时对战 · 3 秒倒计时 · 服务端裁决</span>
+        <span class="hcD">实时对战 · 60 秒倒计时 · 服务端裁决</span>
       </button>
       <button class="hubCard" id="goTrip">
         <span class="hcIco">🍁</span>
@@ -379,7 +379,7 @@ details.sum[open] summary::before{content:"▾ ";}
     </div>
 
     <button class="btn" id="joinBtn">加入房间</button>
-    <div class="foot">3 秒倒计时 · 倒计时结束瞬间按钮点亮 · 服务端裁决先后</div>
+    <div class="foot">60 秒倒计时 · 倒计时结束瞬间按钮点亮 · 服务端裁决先后</div>
   </main>
 
   <!-- ===== 游戏界面 ===== -->
@@ -420,15 +420,20 @@ details.sum[open] summary::before{content:"▾ ";}
      firebase  Firebase Realtime Database（无需服务器，事务保证原子性）
    关键设计：
      · 倒计时结束时刻 endsAt 由「服务端时钟」下发，各端用 serverNow() 对齐，
-       因此 3 秒倒计时在所有手机上同时结束；
+       因此 60 秒倒计时在所有手机上同时结束；
      · 「谁先点」不由本地判断，而由服务端/数据库按收到顺序裁决，避免网络
        延迟或本地时钟偏差导致不公平；
      · 抢答按钮在倒计时期间物理 disabled，杜绝连点作弊。
    ===================================================================== */
 
 /* ------------------------- 常量与工具 ------------------------- */
-const COUNTDOWN_MS    = 3000;   // 倒计时时长（需求：3 秒）
-const CLAIM_WINDOW_MS = 5000;   // 倒计时结束后的有效抢答窗口
+const COUNTDOWN_MS    = 60000;  // 倒计时时长（需求：1 分钟 = 60 秒）
+                                // ⚠ 三层必须同值：SQL 的 quiz_countdown() / server.js 的 COUNTDOWN_MS / 本常量。
+                                // supabase 模式以数据库下发的 ends_at 为权威：只改这里不跑 SQL，线上仍是旧时长。
+const CLAIM_WINDOW_MS = 60000;  // 倒计时结束后的有效抢答窗口（需求：1 分钟；超时无人抢答本轮作废）
+                                // 联机模式（ws / supabase）一律以服务端下发的 closedAt / closed_at 为准，
+                                // 本常量只在「本机多人」模式和服务端未下发窗口时兜底；改窗口请三处同改：
+                                // 此处、server.js 的 CLAIM_WINDOW_MS、SQL 的 quiz_claim_window()。
 const PH = { IDLE:'idle', COUNT:'count', ARMED:'armed', ENDED:'ended' };
 
 const $  = (s, r = document) => r.querySelector(s);
@@ -1143,7 +1148,10 @@ function createSupabaseAdapter(){
     return {
       roundNo : st.round_no || 0,
       phase   : st.round_no ? 'countdown' : 'idle',
-      endsAt, closedAt: endsAt + CLAIM_WINDOW_MS,
+      // 窗口截止时刻以服务端下发的 closed_at 为准（= ends_at + 抢答窗口）；
+      // 仅当服务端未返回该字段（旧库）时才退回本地常量。这样弱网重连、
+      // 甚至有人用着缓存里的旧版页面，判定「窗口是否已关」都与服务端一致。
+      endsAt, closedAt: st.closed_at ? Date.parse(st.closed_at) : endsAt + CLAIM_WINDOW_MS,
       winner  : claims.length ? claims[0] : null,
       claims,
       roles   : st.roles || { host:null, admin:null },
@@ -1387,6 +1395,11 @@ function renderStage(){
   const ph    = derivePhase(SNAP, nowMs);
   const win   = SNAP && SNAP.winner;
   const mine  = !!(win && win.pid === Session.pid);
+  // 本轮抢答窗口总秒数：以服务端下发的 closedAt-endsAt 为准，拿不到才退回本地常量。
+  // 文案必须与实际时长一致，否则会出现「写着 60 秒、实际 5 秒就作废」的误导。
+  const winSec = (SNAP && SNAP.endsAt && SNAP.closedAt > SNAP.endsAt)
+    ? Math.round((SNAP.closedAt - SNAP.endsAt) / 1000)
+    : Math.round(CLAIM_WINDOW_MS / 1000);
 
   // 阶段切换瞬间的音效 / 震动
   if (ph !== phaseCache){
@@ -1397,7 +1410,9 @@ function renderStage(){
 
   if (ph === PH.COUNT){
     const n = Math.max(1, Math.ceil((SNAP.endsAt - nowMs) / 1000));
-    if (n !== lastBeep){ lastBeep = n; sfx.tick(); vib(25); }
+    // 倒计时改为 60 秒后，逐秒提示音/震动只在最后 10 秒触发（否则连响一分钟、耗电且吵）。
+    // 界面数字、按钮可用状态、布局与流程完全不变。
+    if (n !== lastBeep){ lastBeep = n; if (n <= 10){ sfx.tick(); vib(25); } }
     sCls('topTitle', 'num');          sTxt('topTitle', n);
     sTxt('topSub', '准备…倒计时结束立刻点按钮');
     sCls('buzz', '');                 sDis('buzz', true);
@@ -1407,19 +1422,21 @@ function renderStage(){
   }
 
   if (ph === PH.ARMED){
+    // 抢答窗口剩余秒数（1 分钟）：由服务端时钟与 closedAt 推导，三端一致，不新增界面元素
+    const winLeft = Math.max(0, Math.ceil(((SNAP ? SNAP.closedAt : 0) - nowMs) / 1000));
     if (win){
       sCls('topTitle', 'big');        sTxt('topTitle', '🏆 ' + win.name);
       sTxt('topSub', '反应 ' + win.ms + ' ms' + (mine ? ' · 你抢到了！' : ''));
     } else {
       sCls('topTitle', 'goNow');      sTxt('topTitle', '抢答！');
-      sTxt('topSub', '按钮已点亮，立刻点击');
+      sTxt('topSub', '剩余 ' + winLeft + ' 秒 · 立刻点击按钮');
     }
     if (iClaimed){
       sCls('buzz', 'mine');           sDis('buzz', true);
       sTxt('buzzTxt', '已抢答');      sTxt('buzzSub', '等待其他玩家…');
     } else {
       sCls('buzz', 'armed');          sDis('buzz', false);
-      sTxt('buzzTxt', '抢 答');       sTxt('buzzSub', '点我！');
+      sTxt('buzzTxt', '抢 答');       sTxt('buzzSub', '剩 ' + winLeft + ' 秒');
     }
     sDis('startBtn', true);           sTxt('startBtn', '进行中…');
     return;
@@ -1427,17 +1444,17 @@ function renderStage(){
 
   if (ph === PH.ENDED){
     sCls('topTitle', win ? 'big' : '');
-    sTxt('topTitle', win ? '🏆 ' + win.name : '本轮无人抢答');
+    sTxt('topTitle', win ? '🏆 ' + win.name : '本轮超时作废');
     sTxt('topSub', win
       ? ('反应 ' + win.ms + ' ms' + (mine ? ' · 你抢到了！' : ' · 点「开始抢答」进行下一轮'))
-      : '点「开始抢答」重来一轮');
+      : (winSec + ' 秒内无人抢答 · 点「开始抢答」重来一轮'));
     sCls('buzz', mine ? 'mine' : 'done');   sDis('buzz', true);
     sTxt('buzzTxt', win ? (mine ? '你赢了' : win.name) : '未抢答');
     sTxt('buzzSub', win ? win.ms + ' ms' : '下一轮再战');
   } else {  // IDLE
     sCls('topTitle', '');
     sTxt('topTitle', 'Only Treslam');
-    sTxt('topSub', SNAP && SNAP.roundNo ? ('已完成 ' + SNAP.roundNo + ' 轮 · 点「开始抢答」') : '点「开始抢答」进入 3 秒倒计时');
+    sTxt('topSub', SNAP && SNAP.roundNo ? ('已完成 ' + SNAP.roundNo + ' 轮 · 点「开始抢答」') : ('点「开始抢答」进入 ' + (COUNTDOWN_MS / 1000) + ' 秒倒计时'));
     sCls('buzz', '');                        sDis('buzz', true);
     sTxt('buzzTxt', '等待开始');
     sTxt('buzzSub', isPriv() ? '由你发起本轮抢答' : '等待房主或管理员开始');
