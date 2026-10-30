@@ -43,11 +43,17 @@ input,textarea{-webkit-user-select:text;user-select:text}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--idle);display:inline-block}
 .dot.on{background:var(--go);box-shadow:0 0 8px var(--go)}
 .dot.off{background:var(--bad)}
-#topTitle{font-size:30px;font-weight:800;line-height:1.15;margin-top:6px;letter-spacing:1px;word-break:break-all}
+/* 状态文字定宽：弱网下「已连接 / 连接中… / 未连接」来回切换时，居中的顶栏不会左右晃动 */
+#netTxt{display:inline-block;min-width:46px;text-align:left}
+/* 预留 64px 倒计时数字的高度：点「开始抢答」瞬间标题从 30px 文字切成 64px 数字，
+   不预留高度整页会往下弹一次 —— 这就是「一点开始画面就跳」的直接原因 */
+#topTitle{font-size:30px;font-weight:800;line-height:1.15;margin-top:6px;letter-spacing:1px;word-break:break-all;
+  min-height:66px;display:flex;align-items:center;justify-content:center;text-align:center}
 #topTitle.big{font-size:34px;color:var(--win);text-shadow:0 0 24px rgba(251,191,36,.45)}
 #topTitle.num{font-size:64px;line-height:1;font-variant-numeric:tabular-nums;color:var(--acc);text-shadow:0 0 28px rgba(34,211,238,.5)}
 #topTitle.goNow{font-size:40px;color:var(--go);text-shadow:0 0 28px rgba(34,197,94,.55);animation:pop .28s ease}
-#topSub{font-size:12px;color:var(--dim);margin-top:5px;min-height:16px}
+/* 副标题预留两行：文案在 1 行与 2 行之间切换时不推动下方内容 */
+#topSub{font-size:12px;color:var(--dim);margin-top:5px;min-height:32px}
 @keyframes pop{0%{transform:scale(.6);opacity:.3}60%{transform:scale(1.12)}100%{transform:scale(1)}}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 
@@ -88,7 +94,9 @@ textarea{min-height:88px;font-size:13px;font-family:ui-monospace,Menlo,Consolas,
 .cfg.show{display:block}
 
 /* ---------- 玩家 ---------- */
-#players{display:flex;flex-wrap:wrap;gap:6px}
+/* 名单容器预留一行高度：0↔1↔2 人切换时卡片高度不变，
+   下方 233px 抢答按钮与排名区不会被顶得上下跳（移动端跳动的主要放大器） */
+#players{display:flex;flex-wrap:wrap;gap:6px;min-height:34px;align-content:flex-start}
 #players .p{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:12.5px;font-weight:600}
 #players .p.me{border-color:var(--acc);color:var(--acc)}
 #players .p.win{border-color:var(--win);color:var(--win)}
@@ -1137,9 +1145,32 @@ function reasonText(r){
 function createSupabaseAdapter(){
   let sb = null, ch = null, offset = 0, players = {}, beatT = null, pollT = null;
   let hostBeatT = null;
+  let sbUrl = '', sbKey = '';   // 供 leave() 用 fetch(keepalive) 直发 REST（卸载瞬间 Promise 来不及执行）
+  let deadTicks = 0, lastStatus = '', visH = null;
+  // 状态回调去抖：值没变就不通知 UI，避免顶栏文字被反复重写
+  const setStatus = s => { if (s !== lastStatus){ lastStatus = s; try{ cbStatus(s); }catch(e){} } };
   let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, stateCache = null, roomKey = 'default';
   let scope = 'quiz';
   const serverNow = () => Date.now() + offset;
+
+  /* ---------- 在线名单：稳定性优先（移动端防跳动） ----------
+     旧实现：广播心跳 1 秒一次、3.5 秒没听到就删人，且按 Object.values 的插入序渲染。
+     移动网络丢一次包 → 删人 → 下一拍又加回来（还排到末尾）→ 名单每秒增删重排 → 画面一直跳。
+     新规则（并集 + 长窗口，时间上单调，不会来回震荡）：
+       ① 服务端 members（v8 起由 quiz_state 下发，在场窗口 30 秒）为权威来源；
+       ② 本地广播听到的同伴保留 15 秒静默容忍（广播 2 秒一次，可连丢 7 次）；
+       ③ 两个来源取并集后按 pid 排序 —— 顺序恒定，重连不会把人挪到末尾；
+       ④ 自己永远在场；优雅离场由 t:'leave' 广播 + quiz_leave(keepalive) 双路清除，立即消失。 */
+  const PEER_KEEP_MS = 15000;
+  function roster(st){
+    const map = new Map();
+    const srv = (st && Array.isArray(st.members)) ? st.members : null;
+    if (srv) for (const m of srv) if (m && m.pid) map.set(m.pid, { pid:m.pid, name:m.name || '' });
+    const cut = Date.now() - PEER_KEEP_MS;
+    for (const k in players) if (players[k].hb >= cut) map.set(k, { pid:players[k].pid, name:players[k].name });
+    map.set(Session.pid, { pid:Session.pid, name:Session.name });
+    return Array.from(map.values()).sort((a, b) => (a.pid < b.pid ? -1 : a.pid > b.pid ? 1 : 0));
+  }
 
   function toSnap(st){
     st = st || {};
@@ -1155,7 +1186,7 @@ function createSupabaseAdapter(){
       winner  : claims.length ? claims[0] : null,
       claims,
       roles   : st.roles || { host:null, admin:null },
-      players : Object.values(players).map(p => ({ pid:p.pid, name:p.name }))
+      players : roster(st)
     };
   }
   const push = () => cbSnap(toSnap(stateCache));
@@ -1189,7 +1220,10 @@ function createSupabaseAdapter(){
       players[p.pid] = { pid:p.pid, name:p.name, hb:Date.now() };
       push(); return;
     }
-    if (p.t === 'leave'){ delete players[p.pid]; push(); return; }
+    // 有人离场：删本地记录后主动拉一次服务端名单。因为 push() 用的是上一次轮询的
+    // stateCache（members 里可能还有他），不 refresh 就要等下一次 2 秒轮询才消失，
+    // 用户会看到「已经走了的人还挂在名单上」。
+    if (p.t === 'leave'){ delete players[p.pid]; push(); refresh(); return; }
     if (p.t === 'round' || p.t === 'state'){ refresh(); return; }
   }
   function send(base){
@@ -1204,9 +1238,10 @@ function createSupabaseAdapter(){
     onStatus(f){ cbStatus = f; },
 
     async connect(o){
-      cbStatus('connecting');
+      setStatus('connecting');
       await ensureSupabaseSDK();
       roomKey = String(o.room || 'default');
+      sbUrl = String(o.url || ''); sbKey = String(o.anonKey || '');
       sb = supabase.createClient(o.url, o.anonKey, {
         realtime: { params: { eventsPerSecond: 20 } },
         auth: { persistSession: false }
@@ -1239,26 +1274,49 @@ function createSupabaseAdapter(){
       hostBeatT = setInterval(() => {
         if (document.hidden) return;
         const chLive = !!ch && (ch.state === 'joined' || ch.state === 'SUBSCRIBED');
+        // 状态如实反映通道存活（半死页不再谎报「已连接」），但带迟滞：
+        // 连续 2 次（≈10 秒）不在线才判「未连接」，恢复即刻判「已连接」。
+        // 文字定宽 + 回调去抖，状态切换不会造成任何布局位移。
+        deadTicks = chLive ? 0 : deadTicks + 1;
+        setStatus(deadTicks >= 2 ? 'offline' : 'online');
         if (!chLive) return;
+        // ⚠ supabase-js 的 builder 是「惰性」的：不 await、不挂 .then 就永远不会发出请求，
+        //   而且不会报错。这里曾是裸调用 → 线上实测 quiz_beat 请求数恒为 0
+        //   （quiz_state×45 / quiz_transfer_if_stale×16 / 控制台 0 error），
+        //   在场表永远为空 → 僵尸房主无法被接管 → 全房间「开始抢答」长期灰化。
         if (scope === 'quiz')
-          sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid, p_name: Session.name });
+          sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid, p_name: Session.name })
+            .then(() => {}, () => {});
         sb.rpc('quiz_transfer_if_stale', { p_room: roomKey }).then(r => {
           if (r && r.data && r.data.transferred) refresh();
         });
       }, 5000);
       // 页面切后台时暂停心跳与轮询：移动浏览器会节流定时器，恢复瞬间的补跑会造成界面跳变
+      // 广播心跳 1 秒 → 2 秒：移动端省电、降低丢包概率；删除阈值 3.5 秒 → PEER_KEEP_MS(15 秒)。
+      // 名单展示由 roster() 的并集规则决定，这里只负责「长时间静默才真正 forget」。
       beatT = setInterval(() => {
         if (document.hidden) return;
         send({ t:'beat' });
-        const cut = Date.now() - 3500;
+        const cut = Date.now() - PEER_KEEP_MS;
         let changed = false;
         for (const k in players){ if (players[k].hb < cut){ delete players[k]; changed = true; } }
         if (changed) push();
-      }, 1000);
+      }, 2000);
       pollT = setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+      // 手机亮屏/切回前台：立刻补一次在场广播 + 服务端心跳 + 拉一次状态，不干等下一个定时器。
+      // 后台期间本地不删人（15 秒容忍 + 服务端 30 秒窗口），所以恢复瞬间不会「先掉再加」。
+      visH = () => {
+        if (document.hidden) return;
+        try{ send({ t:'join' }); }catch(e){}
+        if (scope === 'quiz' && sb)
+          sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid, p_name: Session.name }).then(() => {}, () => {});
+        refresh();
+      };
+      if (typeof document !== 'undefined' && document.addEventListener)
+        document.addEventListener('visibilitychange', visH);
       await send({ t:'join' });
       await refresh();
-      cbStatus('online');
+      deadTicks = 0; setStatus('online');
     },
 
     async startRound(){
@@ -1318,10 +1376,23 @@ function createSupabaseAdapter(){
     leave(){
       try{ send({ t:'leave' }); }catch(e){}
       // 立即注销在场记录并把房主心跳置空 → 转让不必等 12 秒超时（弱网下更快收敛）
-      try{ sb && sb.rpc('quiz_leave', { p_room: roomKey, p_pid: Session.pid }); }catch(e){}
+      // ⚠ 不能用 sb.rpc(...)：① builder 惰性，裸调用等于没发；② 页面卸载瞬间 Promise 也来不及跑。
+      //   改用 fetch + keepalive 直发 REST，浏览器会在卸载后继续把请求送完，
+      //   离场即可注销在场记录，房主转让不必干等 12 秒超时。
+      try{
+        if (sbUrl && sbKey) fetch(sbUrl.replace(/\/+$/, '') + '/rest/v1/rpc/quiz_leave', {
+          method   : 'POST',
+          keepalive: true,
+          headers  : { 'Content-Type':'application/json', apikey: sbKey, Authorization: 'Bearer ' + sbKey },
+          body     : JSON.stringify({ p_room: roomKey, p_pid: Session.pid })
+        }).catch(() => {});
+      }catch(e){}
     },
     close(){
       clearInterval(beatT); clearInterval(pollT); clearInterval(hostBeatT);
+      if (typeof document !== 'undefined' && document.removeEventListener && visH)
+        document.removeEventListener('visibilitychange', visH);
+      visH = null;
       try{ ch && sb && sb.removeChannel(ch); }catch(e){}
     }
   };
