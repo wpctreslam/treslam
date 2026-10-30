@@ -1225,8 +1225,13 @@ function createSupabaseAdapter(){
       // 在场心跳 + 房主转让检查，每 5 秒一次，全部由服务端原子裁决：
       //   quiz_beat            → 登记「我在场」（仅抢答席位参与房主池）
       //   quiz_transfer_if_stale → 房主空悬时按「管理员优先、否则随机在场成员」转让
+      // 关键：心跳必须绑定 Realtime 通道存活。弱网下会出现「通道已死但 REST 还通」的
+      // 半死标签页——它不在任何人的玩家名单里，却靠 REST 心跳霸占房主席位，造成
+      // 「唯一可见玩家不是房主、按钮全灰」的界面错乱。通道不在线就停止续期，12 秒内让位。
       hostBeatT = setInterval(() => {
         if (document.hidden) return;
+        const chLive = !!ch && (ch.state === 'joined' || ch.state === 'SUBSCRIBED');
+        if (!chLive) return;
         if (scope === 'quiz')
           sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid, p_name: Session.name });
         sb.rpc('quiz_transfer_if_stale', { p_room: roomKey }).then(r => {
