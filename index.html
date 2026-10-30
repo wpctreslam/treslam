@@ -485,7 +485,7 @@ function derivePhase(s, now){
 }
 function defaultState(){
   return { roundNo:0, phase:'idle', endsAt:0, closedAt:0, winner:null, claims:[], players:[],
-           roles:{ host:null, admin:null }, chat:[] };
+           roles:{ host:null, admin:null }, chat:[], chatPlayers:[] };
 }
 
 /* ------------------------- 声音 / 震动 / 常亮 ------------------------- */
@@ -544,7 +544,7 @@ function toast(msg, isErr){
    ===================================================================== */
 function createLocalAdapter(){
   const myId = Session.pid + '-' + rid();
-  let room = '', ch = null, isLeader = false, state = null, players = {};
+  let room = '', ch = null, isLeader = false, state = null, players = {}, scope = 'quiz';
   let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, beatT = null, leaseT = null, snapT = null, lastSnapAt = 0;
 
   const SK = () => 'qp_state_' + room;
@@ -587,19 +587,32 @@ function createLocalAdapter(){
     switch (m.t){
       case 'join':
       case 'beat': {
+        const sc = m.scope === 'chat' ? 'chat' : 'quiz';
+        state.chatPlayers = state.chatPlayers || [];
         const dup = state.players.some(p => p.pid !== m.pid && p.name === m.name);
         if (dup) return { t:'error', to:m.from, msg:'昵称「' + m.name + '」已被占用，请换一个' };
+        if (sc === 'chat'){
+          // 仅聊天：不进玩家名单、不参与房主判定
+          let cp = state.chatPlayers.find(x => x.pid === m.pid);
+          if (!cp){ cp = { pid:m.pid, name:m.name, hb:t }; state.chatPlayers.push(cp); }
+          cp.name = m.name; cp.hb = t;
+          mutate();
+          post({ t:'chat_init', list: state.chat || [], to: m.from });
+          return { t:'ok', to:m.from };
+        }
+        state.chatPlayers = state.chatPlayers.filter(x => x.pid !== m.pid);  // 聊天席位升级为抢答席位
         let p = state.players.find(x => x.pid === m.pid);
         if (!p){ p = { pid:m.pid, name:m.name, hb:t }; state.players.push(p); }
         p.name = m.name; p.hb = t;
         if (!state.roles) state.roles = { host:null, admin:null };
-        if (!state.roles.host) state.roles.host = m.pid;      // 房主 = 首个进房者
+        if (!state.roles.host) state.roles.host = m.pid;      // 房主 = 首个以抢答身份进房者
         mutate();
         post({ t:'chat_init', list: state.chat || [], to: m.from });   // 聊天历史随加入下发
         return { t:'ok', to:m.from };
       }
       case 'leave':
         state.players = state.players.filter(x => x.pid !== m.pid);
+        state.chatPlayers = (state.chatPlayers || []).filter(x => x.pid !== m.pid);
         promoteAfterLeave(m.pid);
         mutate(); return null;
       case 'set_admin': {
@@ -678,11 +691,14 @@ function createLocalAdapter(){
   return {
     kind: 'local',
     serverNow: () => now(),
+    get scope(){ return scope; },
     onSnapshot(f){ cbSnap = f; },
     onStatus(f){ cbStatus = f; },
+    async upgradeScope(){ if (scope === 'quiz') return; scope = 'quiz'; await send({ t:'join', scope }); },
 
     async connect(o){
       room = String(o.room || 'default').toUpperCase();
+      scope = o.scope === 'chat' ? 'chat' : 'quiz';
       state = rd(SK()) || defaultState();
       if (typeof BroadcastChannel !== 'function')
         throw new Error('此浏览器不支持 BroadcastChannel，无法使用本地演示模式');
@@ -703,6 +719,7 @@ function createLocalAdapter(){
           const before = state.players.length;
           const gone = state.players.filter(p => p.pid !== Session.pid && now() - p.hb >= 3500).map(p => p.pid);
           state.players = state.players.filter(p => p.pid === Session.pid || now() - p.hb < 3500);
+          state.chatPlayers = (state.chatPlayers || []).filter(p => p.pid === Session.pid || now() - p.hb < 3500);
           if (state.players.length !== before){ gone.forEach(promoteAfterLeave); mutate(); }
         } else if (!l || now() - l.ts > 2500){
           isLeader = await tryLeader();                                // 原 leader 掉线 → 接管
@@ -710,7 +727,7 @@ function createLocalAdapter(){
         }
       }, 800);
       beatT = setInterval(() => send({ t:'beat' }), 1000);
-      await send({ t:'join' });
+      await send({ t:'join', scope });
       await sleep(150);
       if (!isLeader && now() - lastSnapAt > 1200) isLeader = await tryLeader();  // 无主则自立
       if (isLeader && !SNAP) mutate();
@@ -749,7 +766,7 @@ function createLocalAdapter(){
    协议见 server.js：join / time / start / claim / reset / snapshot / error
    ===================================================================== */
 function createWSAdapter(){
-  let ws = null, url = '', room = '', offset = 0, closedByMe = false;
+  let ws = null, url = '', room = '', offset = 0, closedByMe = false, scope = 'quiz';
   let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, hb = null, retries = 0, pending = [];
 
   function send(o){
@@ -786,10 +803,14 @@ function createWSAdapter(){
   return {
     kind: 'ws',
     serverNow: () => Date.now() + offset,
+    get scope(){ return scope; },
     onSnapshot(f){ cbSnap = f; },
     onStatus(f){ cbStatus = f; },
+    /* 从「仅聊天」升级为「抢答」席位：补发一次 quiz scope 的 join */
+    async upgradeScope(){ if (scope === 'quiz') return; scope = 'quiz'; send({ t:'join', name: Session.name, pid: Session.pid, scope }); },
 
     async connect(o){
+      scope = o.scope === 'chat' ? 'chat' : 'quiz';
       url = o.url; room = String(o.room || 'default').toUpperCase();
       closedByMe = false;
       await open();
@@ -822,7 +843,7 @@ function createWSAdapter(){
       sock.onopen = done(async () => {
         retries = 0;
         try{ await syncTime(); }catch(e){}
-        send({ t:'join', name: Session.name, pid: Session.pid });
+        send({ t:'join', name: Session.name, pid: Session.pid, scope });
         flush();
         cbStatus('online');
         clearInterval(hb);
@@ -903,7 +924,7 @@ function parseFirebaseConfig(text){
 
 function createFirebaseAdapter(){
   let db = null, root = null, stateRef = null, playersRef = null, meRef = null;
-  let offset = 0, playersCache = [], stateCache = null, lastPromote = null;
+  let offset = 0, playersCache = [], stateCache = null, lastPromote = null, scope = 'quiz';
   let cbSnap = () => {}, cbStatus = () => {};
   const serverNow = () => Date.now() + offset;
   const push = () => cbSnap({ ...(stateCache || defaultState()), players: playersCache });
@@ -931,13 +952,16 @@ function createFirebaseAdapter(){
        await meRef.set({ name: Session.name, at: firebase.database.ServerValue.TIMESTAMP });
        meRef.onDisconnect().remove();          // 断线自动离开（在线状态）
 
-       // 房主 = 首个进房者（事务保证并发下只有一人成为房主）
-       await stateRef.transaction(cur => {
-         cur = cur || defaultState();
-         if (!cur.roles) cur.roles = { host:null, admin:null };
-         if (!cur.roles.host) cur.roles.host = Session.pid;
-         return cur;
-       });
+       // 房主 = 首个以「抢答」身份进房者（事务保证并发下只有一人成为房主）；仅聊天不抢房主
+       scope = o.scope === 'chat' ? 'chat' : 'quiz';
+       if (scope === 'quiz'){
+         await stateRef.transaction(cur => {
+           cur = cur || defaultState();
+           if (!cur.roles) cur.roles = { host:null, admin:null };
+           if (!cur.roles.host) cur.roles.host = Session.pid;
+           return cur;
+         });
+       }
 
        stateRef.on('value', s => { stateCache = s.val() || defaultState(); push(); });
        playersRef.on('value', s => {
@@ -1031,6 +1055,17 @@ function createFirebaseAdapter(){
       });
     },
 
+    get scope(){ return scope; },
+    async upgradeScope(){
+      if (scope === 'quiz') return;
+      scope = 'quiz';
+      await stateRef.transaction(cur => {
+        cur = cur || defaultState();
+        if (!cur.roles) cur.roles = { host:null, admin:null };
+        if (!cur.roles.host) cur.roles.host = Session.pid;
+        return cur;
+      });
+    },
     onChat(){},                                  // Firebase 模式不提供聊天室（该模式国内不可达，仅保留抢答）
     async chatSend(){ toast('Firebase 模式不支持聊天室，请用默认链接进入', true); },
     async chatHistory(){ return []; },
@@ -1080,6 +1115,7 @@ function reasonText(r){
 function createSupabaseAdapter(){
   let sb = null, ch = null, offset = 0, players = {}, beatT = null, pollT = null;
   let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, stateCache = null, roomKey = 'default';
+  let scope = 'quiz';
   const serverNow = () => Date.now() + offset;
 
   function toSnap(st){
@@ -1164,7 +1200,9 @@ function createSupabaseAdapter(){
         });
       });
       await syncTime();
-      await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
+      scope = o.scope === 'chat' ? 'chat' : 'quiz';
+      // 登记进房：服务端把首个「抢答身份」加入者记为房主；仅聊天不登记、不抢房主
+      if (scope === 'quiz') await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
       beatT = setInterval(() => {
         send({ t:'beat' });
         const cut = Date.now() - 3500;
@@ -1211,6 +1249,13 @@ function createSupabaseAdapter(){
       await refresh();
     },
 
+    get scope(){ return scope; },
+    async upgradeScope(){
+      if (scope === 'quiz') return;
+      scope = 'quiz';
+      await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
+      await refresh();
+    },
     onChat(f){ chatCb = f; },
     async chatSend(text){
       const t = String(text || '').trim().slice(0, 500);
@@ -1413,13 +1458,21 @@ async function joinRoom(){
   audio();                                   // 用户手势中解锁 iOS 音频
 
   try{
-    ADAPTER = mode === 'ws' ? createWSAdapter()
-            : mode === 'firebase' ? createFirebaseAdapter()
-            : mode === 'supabase' ? createSupabaseAdapter()
-            : createLocalAdapter();
-    ADAPTER.onSnapshot(onSnapshot);
-    ADAPTER.onStatus(setNet);
-    await ADAPTER.connect(opts);
+    const wantKind = mode === 'ws' ? 'ws' : mode === 'firebase' ? 'firebase' : mode === 'supabase' ? 'supabase' : 'local';
+    if (ADAPTER && ADAPTER.room === room && ADAPTER.kind === wantKind){
+      await ADAPTER.upgradeScope();            // 已在该房间（可能仅聊天席位）→ 升级为抢答席位
+    } else {
+      if (ADAPTER){ try{ ADAPTER.leave(); ADAPTER.close(); }catch(e){} ADAPTER = null; }
+      ADAPTER = mode === 'ws' ? createWSAdapter()
+              : mode === 'firebase' ? createFirebaseAdapter()
+              : mode === 'supabase' ? createSupabaseAdapter()
+              : createLocalAdapter();
+      ADAPTER.onSnapshot(onSnapshot);
+      ADAPTER.onStatus(setNet);
+      ADAPTER.onChat(appendChat);
+      await ADAPTER.connect(opts);
+      ADAPTER.room = room;
+    }
     joined = true; iClaimed = false; SNAP = null; phaseCache = PH.IDLE;
     $('#roomTag').textContent = '房间 ' + room;
     $('#joinScreen').classList.add('hidden');
@@ -1550,7 +1603,7 @@ function appendChat(m){
 async function connectFor(room){
   const mode = (document.querySelector('input[name=mode]:checked') || {}).value || 'local';
   ensureName();
-  const opts = { room, name: Session.name };
+  const opts = { room, name: Session.name, scope: 'chat' };   // 聊天席位：不占玩家位、不抢房主
   if (mode === 'supabase'){
     opts.url = store.get('sb_url', location.host.endsWith('.supabase.co') ? location.origin : '');
     opts.anonKey = store.get('sb_key', '');
