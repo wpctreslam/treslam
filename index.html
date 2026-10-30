@@ -1123,6 +1123,7 @@ function reasonText(r){
 
 function createSupabaseAdapter(){
   let sb = null, ch = null, offset = 0, players = {}, beatT = null, pollT = null;
+  let hostBeatT = null, hostAbsentSince = 0;
   let cbSnap = () => {}, cbStatus = () => {}, chatCb = () => {}, stateCache = null, roomKey = 'default';
   let scope = 'quiz';
   const serverNow = () => Date.now() + offset;
@@ -1210,8 +1211,15 @@ function createSupabaseAdapter(){
       });
       await syncTime();
       scope = o.scope === 'chat' ? 'chat' : 'quiz';
-      // 登记进房：服务端把首个「抢答身份」加入者记为房主；仅聊天不登记、不抢房主
+      // 登记进房：服务端把首个「抢答身份」加入者记为房主；仅聊天不登记、不抢房主。
+      // 若房间里的房主心跳已停超过 20 秒（上一场遗留 / 掉线空悬），服务端在此原子接管给我。
       if (scope === 'quiz') await sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid });
+      // 房主心跳：每 5 秒续期 host_seen_at，证明「房主还在场」
+      hostBeatT = setInterval(() => {
+        if (document.hidden) return;
+        const rh = stateCache && stateCache.roles ? stateCache.roles.host : null;
+        if (rh === Session.pid) sb.rpc('quiz_beat', { p_room: roomKey, p_pid: Session.pid });
+      }, 5000);
       // 页面切后台时暂停心跳与轮询：移动浏览器会节流定时器，恢复瞬间的补跑会造成界面跳变
       beatT = setInterval(() => {
         if (document.hidden) return;
@@ -1220,6 +1228,16 @@ function createSupabaseAdapter(){
         let changed = false;
         for (const k in players){ if (players[k].hb < cut){ delete players[k]; changed = true; } }
         if (changed) push();
+        // 空悬房主回收：房主不在在线名单里持续 12 秒，且我是最早在册者 → 请求接管（服务端原子裁决）
+        const rh = stateCache && stateCache.roles ? stateCache.roles.host : null;
+        if (rh && rh !== Session.pid && !players[rh]){
+          if (!hostAbsentSince) hostAbsentSince = Date.now();
+          else if (Date.now() - hostAbsentSince > 12000 &&
+                   Object.keys(players)[0] === Session.pid && scope === 'quiz'){
+            hostAbsentSince = 0;
+            sb.rpc('quiz_room_join', { p_room: roomKey, p_pid: Session.pid }).then(refresh);
+          }
+        } else hostAbsentSince = 0;
       }, 1000);
       pollT = setInterval(() => { if (!document.hidden) refresh(); }, 2000);
       await send({ t:'join' });
@@ -1283,7 +1301,7 @@ function createSupabaseAdapter(){
 
     leave(){ try{ send({ t:'leave' }); }catch(e){} },
     close(){
-      clearInterval(beatT); clearInterval(pollT);
+      clearInterval(beatT); clearInterval(pollT); clearInterval(hostBeatT);
       try{ ch && sb && sb.removeChannel(ch); }catch(e){}
     }
   };
